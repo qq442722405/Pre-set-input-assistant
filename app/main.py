@@ -1,7 +1,7 @@
 import sys, os, json, time, ctypes
 from ctypes import wintypes
 from PySide6.QtCore import Qt, QTimer, Signal, QObject, QPoint
-from PySide6.QtGui import QAction
+from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QLineEdit,
     QLabel, QSystemTrayIcon, QMenu, QCheckBox, QComboBox, QDialog,
@@ -211,13 +211,23 @@ class App(QObject):
             with open(CONFIG,'w',encoding='utf-8') as f: json.dump({'programs':self.programs,'global_items':self.global_items,'enabled':self.enabled},f,ensure_ascii=False,indent=2)
         except Exception as e: print('save error',e)
     def setup_tray(self):
-        self.tray=QSystemTrayIcon(self); self.tray.setToolTip(APP_NAME)
+        icon_path = os.path.join(BASE_DIR, 'app.ico')
+        icon = QIcon(icon_path) if os.path.exists(icon_path) else QIcon()
+        QApplication.instance().setWindowIcon(icon)
+        self.tray=QSystemTrayIcon(self)
+        self.tray.setIcon(icon)
+        self.tray.setToolTip(APP_NAME + '（右键打开设置）')
         self.menu=QMenu(); self.menu.addAction('设置每个程序的预输入', self.open_settings)
         self.menu.addAction('添加/删除预置内容', self.open_settings)
         self.menu.addSeparator(); self.toggle_action=QAction('关闭所有程序的右键预输入',self); self.toggle_action.triggered.connect(self.toggle_all); self.menu.addAction(self.toggle_action)
         self.menu.addAction('重新加载配置', self.reload)
         self.menu.addSeparator(); self.menu.addAction('退出程序', self.quit)
-        self.tray.setContextMenu(self.menu); self.tray.show(); self.update_toggle_text()
+        self.tray.setContextMenu(self.menu)
+        self.tray.show()
+        # Windows 托盘图标需要显式保持可见；如果系统通知区域不可用则给出提示
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            QMessageBox.warning(None, APP_NAME, '系统托盘不可用，程序仍会在后台运行。请检查 Windows 通知区域设置。')
+        self.update_toggle_text()
     def update_toggle_text(self):
         self.toggle_action.setText('关闭所有程序的右键预输入' if self.enabled else '开启所有程序的右键预输入')
     def start_listener(self):

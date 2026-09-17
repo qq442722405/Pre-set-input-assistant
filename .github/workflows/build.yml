@@ -18,8 +18,9 @@ jobs:
       - name: Build EXE
         shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --onedir --windowed --name "预置输入助手" app/main.py
+          pyinstaller --noconfirm --clean --onedir --windowed --name "预置输入助手" --icon "app/app.ico" app/main.py
           Copy-Item config.json dist/预置输入助手/config.json -Force
+          Copy-Item app/app.ico dist/预置输入助手/app.ico -Force
       - name: Zip
         shell: pwsh
         run: Compress-Archive -Path "dist/预置输入助手/*" -DestinationPath "预置输入助手-Windows.zip" -Force

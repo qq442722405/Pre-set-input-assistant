@@ -1,6 +1,8 @@
 name: Build Windows
+
 on:
   workflow_dispatch:
+
 jobs:
   build:
     runs-on: windows-latest
@@ -13,12 +15,11 @@ jobs:
           python-version: '3.11'
       - name: Install dependencies
         run: python -m pip install --upgrade pip && pip install -r requirements.txt
-      - name: Build
+      - name: Build EXE
         shell: pwsh
         run: |
           pyinstaller --noconfirm --clean --onedir --windowed --name "预置输入助手" app/main.py
-          Copy-Item config.json "dist/预置输入助手/config.json" -Force
-          Copy-Item README.md "dist/预置输入助手/README.md" -Force
+          Copy-Item config.json dist/预置输入助手/config.json -Force
       - name: Zip
         shell: pwsh
         run: Compress-Archive -Path "dist/预置输入助手/*" -DestinationPath "预置输入助手-Windows.zip" -Force

@@ -27,6 +27,45 @@ def set_autostart(on):
         winreg.CloseKey(k)
     except Exception as e: raise RuntimeError(str(e))
 
+
+# --- Windows global mouse hook helpers ---
+WH_MOUSE_LL=14
+WM_RBUTTONDOWN=0x0204
+WM_LBUTTONDOWN=0x0201
+PROCESS_QUERY_LIMITED_INFORMATION=0x1000
+class POINT(ctypes.Structure): _fields_=[('x',ctypes.c_long),('y',ctypes.c_long)]
+class MSLLHOOKSTRUCT(ctypes.Structure): _fields_=[('pt',POINT),('mouseData',ctypes.c_ulong),('flags',ctypes.c_ulong),('time',ctypes.c_ulong),('dwExtraInfo',ctypes.c_void_p)]
+LowLevelMouseProc=ctypes.WINFUNCTYPE(ctypes.c_long,ctypes.c_int,ctypes.c_ulong,ctypes.POINTER(MSLLHOOKSTRUCT))
+user32=ctypes.windll.user32
+kernel32=ctypes.windll.kernel32
+
+def foreground_exe(hwnd):
+    if not hwnd: return ''
+    pid=ctypes.c_ulong(); user32.GetWindowThreadProcessId(hwnd,ctypes.byref(pid))
+    h=kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION,False,pid.value)
+    if not h: return ''
+    try:
+        buf=ctypes.create_unicode_buffer(32768); n=ctypes.c_ulong(len(buf))
+        if kernel32.QueryFullProcessImageNameW(h,0,buf,ctypes.byref(n)): return os.path.abspath(buf.value)
+    finally: kernel32.CloseHandle(h)
+    return ''
+
+def menu_rect_near(x,y):
+    out=[]
+    Proc=ctypes.WINFUNCTYPE(ctypes.c_bool,ctypes.c_void_p,ctypes.c_void_p)
+    def cb(hwnd,lparam):
+        if not user32.IsWindowVisible(hwnd): return True
+        name=ctypes.create_unicode_buffer(128); user32.GetClassNameW(hwnd,name,128)
+        if name.value!='#32768': return True
+        r=ctypes.wintypes.RECT(); user32.GetWindowRect(hwnd,ctypes.byref(r))
+        out.append((r.left,r.top,r.right,r.bottom))
+        return True
+    import ctypes.wintypes
+    fn=Proc(cb); user32.EnumWindows(fn,0)
+    for r in out:
+        if r[0]<=x<=r[2] and r[1]<=y<=r[3]: return r
+    return min(out,key=lambda r:(max(r[0]-x,0,x-r[2])**2+max(r[1]-y,0,y-r[3])**2),default=None)
+
 class Settings(QDialog):
     def __init__(self,app):
         super().__init__(app); self.app=app; self.cfg=load(); self.current=None
@@ -97,9 +136,9 @@ class Settings(QDialog):
         save(self.cfg); self.app.reload(); self.accept()
 
 class Overlay(QDialog):
-    def __init__(self,app,items,pos):
+    def __init__(self,app,items,pos,target_hwnd=None):
         super().__init__(None,Qt.Tool|Qt.FramelessWindowHint|Qt.WindowStaysOnTopHint)
-        self.app=app; self.setAttribute(Qt.WA_ShowWithoutActivating); self.setStyleSheet("""
+        self.app=app; self.target_hwnd=target_hwnd; self.setAttribute(Qt.WA_ShowWithoutActivating); self.setStyleSheet("""
         QDialog{background:#111;border:1px solid #555;border-radius:6px}
         QPushButton{background:#181818;color:white;border:0;padding:8px 14px;text-align:left}
         QPushButton:hover{background:#333}""")
@@ -108,31 +147,67 @@ class Overlay(QDialog):
             b=QPushButton(s); b.clicked.connect(lambda _,x=s:self.input_text(x)); v.addWidget(b)
         self.adjustSize(); self.move(pos)
     def input_text(self,s):
-        self.hide(); QApplication.clipboard().setText(s)
-        # Ctrl+V into the control under the mouse, preserving native right-click behavior
-        ctypes.windll.user32.keybd_event(0x11,0,0,0); ctypes.windll.user32.keybd_event(0x56,0,0,0); ctypes.windll.user32.keybd_event(0x56,0,2,0); ctypes.windll.user32.keybd_event(0x11,0,2,0)
+        self.hide(); self.app.overlay=None
+        # 关闭原生右键菜单，再把焦点恢复到原目标窗口。
+        user32.keybd_event(0x1B,0,0,0); user32.keybd_event(0x1B,0,2,0)
+        time.sleep(0.05)
+        if self.target_hwnd and user32.IsWindow(self.target_hwnd): user32.SetForegroundWindow(self.target_hwnd)
+        QApplication.clipboard().setText(s); time.sleep(0.05)
+        user32.keybd_event(0x11,0,0,0); user32.keybd_event(0x56,0,0,0); user32.keybd_event(0x56,0,2,0); user32.keybd_event(0x11,0,2,0)
     def closeEvent(self,e): self.app.overlay=None; e.accept()
 
 class App(QApplication):
     def __init__(self):
-        super().__init__(sys.argv); self.setQuitOnLastWindowClosed(False); self.icon=QIcon(str(APP_DIR/"app.ico"))
+        super().__init__(sys.argv); self.setQuitOnLastWindowClosed(False)
+        self.icon=QIcon(str(APP_DIR/'app.ico'))
         if self.icon.isNull(): self.icon=self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon)
-        self.tray=QSystemTrayIcon(self.icon); self.tray.setToolTip("预置输入助手"); self.tray.activated.connect(self.tray_click)
-        m=QMenu(); self.settings_action=QAction("设置",m); self.exit_action=QAction("退出",m)
-        self.settings_action.triggered.connect(self.open_settings); self.exit_action.triggered.connect(self.quit)
-        m.addAction(self.settings_action); m.addSeparator(); m.addAction(self.exit_action); self.tray.setContextMenu(m); self.tray.show()
-        self.overlay=None; self.last_buttons=False; self.reload()
+        self.tray=QSystemTrayIcon(self.icon); self.tray.setToolTip('预置输入助手'); self.tray.activated.connect(self.tray_click)
+        m=QMenu(); a=QAction('设置',m); e=QAction('退出',m); a.triggered.connect(self.open_settings); e.triggered.connect(self.exit_app); m.addAction(a); m.addSeparator(); m.addAction(e); self.tray.setContextMenu(m); self.tray.show()
+        self.settings=None; self.overlay=None; self.pending=None; self.reload()
+        self._proc=LowLevelMouseProc(self.mouse_hook)
+        self._hook=user32.SetWindowsHookExW(WH_MOUSE_LL,self._proc,kernel32.GetModuleHandleW(None),0)
+        if not self._hook: self.tray.showMessage('预置输入助手','全局鼠标监听启动失败，请尝试管理员运行。',QSystemTrayIcon.Warning,4000)
+    def reload(self): self.cfg=load()
     def open_settings(self):
-        self.settings=Settings(self); self.settings.setAttribute(Qt.WA_DeleteOnClose,True); self.settings.show(); self.settings.raise_(); self.settings.activateWindow()
+        if self.settings:
+            try: self.settings.raise_(); self.settings.activateWindow(); return
+            except RuntimeError: self.settings=None
+        self.settings=Settings(self); self.settings.setAttribute(Qt.WA_DeleteOnClose); self.settings.finished.connect(lambda: setattr(self,'settings',None)); self.settings.show(); self.settings.raise_(); self.settings.activateWindow()
     def tray_click(self,r):
         if r==QSystemTrayIcon.DoubleClick: self.open_settings()
-    def reload(self):
-        self.cfg=load()
-    def notify(self,pos):
-        # placeholder for hook integration; global mouse hook implemented below
-        pass
-    def quit(self):
-        self.tray.hide(); super().quit()
+    def mouse_hook(self,nCode,wParam,lParam):
+        if nCode>=0 and lParam:
+            try:
+                d=lParam.contents; x,y=int(d.pt.x),int(d.pt.y)
+                if wParam==WM_RBUTTONDOWN:
+                    hwnd=user32.GetForegroundWindow(); exe=foreground_exe(hwnd)
+                    self.pending=(hwnd,exe,x,y); QTimer.singleShot(140,self.show_pending)
+                elif wParam==WM_LBUTTONDOWN and self.overlay:
+                    self.overlay.close(); self.overlay=None
+            except Exception: pass
+        return user32.CallNextHookEx(self._hook,nCode,wParam,lParam)
+    def show_pending(self):
+        if not self.pending: return
+        hwnd,exe,x,y=self.pending; d=None
+        for k,v in self.cfg.get('programs',{}).items():
+            path=str(v.get('path',k))
+            if os.path.abspath(path).lower()==os.path.abspath(exe).lower(): d=v; break
+        if not d or not d.get('enabled') or not d.get('items'): return
+        if self.overlay: self.overlay.close()
+        items=[str(v) for v in d.get('items',[]) if str(v)]
+        if not items: return
+        self.overlay=Overlay(self,items, QPoint(x+220,y+5), hwnd)
+        r=menu_rect_near(x,y)
+        if r:
+            pos=QPoint(r[2]+6,r[1]); screen=QApplication.screenAt(QPoint(x,y)) or QApplication.primaryScreen(); a=screen.availableGeometry()
+            if pos.x()+self.overlay.width()>a.right(): pos.setX(max(a.left(),r[0]-self.overlay.width()-6))
+            if pos.y()+self.overlay.height()>a.bottom(): pos.setY(max(a.top(),a.bottom()-self.overlay.height()))
+            self.overlay.move(pos)
+        self.overlay.show(); self.overlay.raise_()
+    def exit_app(self):
+        if self.overlay: self.overlay.close()
+        if self._hook: user32.UnhookWindowsHookEx(self._hook); self._hook=None
+        self.tray.hide(); self.quit()
 
 if __name__=="__main__":
     app=App()
